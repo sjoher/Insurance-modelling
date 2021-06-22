@@ -1,0 +1,769 @@
+---
+title: "End-term code"
+author: "Sjoerd Hermes - s1671014"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Setting the directory. Please change this to your own working directory. Also make sure the insurance.csv file is in that directory, otherwise you have to change the path in the next block of code as well.
+```{r}
+setwd("~/Documents/Master Statistiek/Jaar 2/Advanced Statistical Computing/End-term project")
+```
+
+Reading the data
+```{r}
+insurance <- read.csv("insurance.csv")
+```
+
+Note that options(scipen = 999) was used here. This removes the scientific notation, which was required for plotting the values of \(V(t)\) and \(P(t)\), as ggplot has some problems with scientific notation. Next to that, the required libraries are loaded here, such that we do not have to do so later on.
+```{r}
+options(scipen = 999)
+library(latex2exp)
+library(tidyverse)
+library(copula)
+library(scatterplot3d)
+library(grid)
+library(GA) 
+library(ggplot2)
+library(ggpubr)
+```
+
+Finally, a seed was set to ensure replicability.
+```{r}
+set.seed(2020)
+```
+
+Scatterplot showing dependence between PLI and WC
+```{r}
+ggplot(insurance, aes(x=PLI, y=WC)) +
+  geom_point(color = "steelblue2") +
+       ggtitle("Scatterplot PLI and WC") +
+       xlab("PLI") + 
+       ylab("WC") +
+       theme(plot.title = element_text(size = 10, face = "bold"))
+```
+
+Starting values for \(\mu_1, \sigma_1, \mu_2, \sigma_2\)
+```{r}
+param_start <- function(data){
+  cols <- ncol(data)
+  x_1 <- data[,cols-1]
+  x_2 <- data[,cols]
+  n_1 <- length(x_1)
+  n_2 <- length(x_2)
+
+  mu_1 <- (sum(log(x_1)))/n_1
+  sigma_1 <- sqrt((sum((log(x_1)-mu_1)^2))/n_1)
+  mu_2 <- (sum(log(x_2)))/n_2
+  sigma_2 <- sqrt((sum((log(x_2)-mu_2)^2))/n_2) 
+  return(c(mu_1, sigma_1, mu_2, sigma_2))
+}
+param_start(insurance)
+```
+
+The function which returns \(\hat \mu_1, \hat \sigma_1, \hat \mu_2, \hat \sigma_2, \hat \theta\). Note that the function which estimates \(\theta\) has been incorporated into the main function, as the assignment asks for a separate function to estimate \(\theta\).
+```{r}
+param_estimator <- function(data){
+  cols <- ncol(data)
+  x_1 <- data[,cols-1]
+  x_2 <- data[,cols]
+
+  LL_1 <- function(theta){
+    meanlog <- theta[1]
+    sdlog <- theta[2]
+    -sum(dlnorm(x_1, meanlog, sdlog, log = TRUE))
+  }
+
+  LL_2 <- function(theta){
+    meanlog <- theta[1]
+    sdlog <- theta[2]
+    -sum(dlnorm(x_2, meanlog, sdlog, log = TRUE))
+  }
+
+  param_starts <- param_start(data)
+  mu_1 <-param_starts[1]
+  sigma_1 <- param_starts[2]
+  p_1 <- array(c(mu_1, sigma_1), dim = c(2, 1))
+
+  mu_2 <- param_starts[3]
+  sigma_2 <- param_starts[4]
+  p_2 <- array(c(mu_2, sigma_2), dim = c(2, 1))
+
+  mu_1_hat <- optim(p_1, LL_1)$par[1]
+  sigma_1_hat <- optim(p_1, LL_1)$par[2]
+  mu_2_hat <- optim(p_2, LL_2)$par[1]
+  sigma_2_hat <- optim(p_2, LL_2)$par[2]
+
+  theta_estimator <- function(x_1, x_2, mu_1_hat, sigma_1_hat, mu_2_hat, sigma_2_hat){
+    F_1 <- function(q, mu_1_hat, sigma_1_hat) plnorm(q, mu_1_hat, sigma_1_hat)
+    F_2 <- function(q, mu_2_hat, sigma_2_hat) plnorm(q, mu_2_hat, sigma_2_hat)
+  
+    U_1_hat <- F_1
+    U_2_hat <- F_2
+    u1 <- sapply(x_1, U_1_hat, mu_1_hat, sigma_1_hat)
+    u2 <- sapply(x_2, U_2_hat, mu_2_hat, sigma_2_hat)
+    u <- matrix(cbind(u1,u2), ncol = 2)
+
+    LL_C <- function(theta){
+      -sum(dCopula(u, joeCopula(theta), log = TRUE))
+    }
+
+    theta <-1
+    theta_hat <- optim(theta, LL_C, method = "Brent", lower = 1, upper = 30)$par
+    return(theta_hat)
+  }
+  theta_hat <- theta_estimator(x_1, x_2, mu_1_hat, sigma_1_hat, mu_2_hat, sigma_2_hat)
+
+  return(c(mu_1_hat, sigma_1_hat, mu_2_hat, sigma_2_hat, theta_hat))
+}
+
+param_estimator(insurance)
+```
+
+This is a function that samples from the joint model
+```{r}
+joint_model_sampler <- function(n, mu_1_hat, sigma_1_hat, mu_2_hat, sigma_2_hat, theta_hat){
+  Copula_samples <- rCopula(n, joeCopula(theta_hat))
+  U_1 <- Copula_samples[,1]
+  U_2 <- Copula_samples[,2]
+  X_1_samples <- qlnorm(U_1, mu_1_hat, sigma_1_hat)
+  X_2_samples <- qlnorm(U_2, mu_2_hat, sigma_2_hat)
+  return(matrix(cbind(X_1_samples,X_2_samples), ncol = 2))
+}
+```
+
+Comparing the simulated data with the observed data. 
+```{r}
+params <- param_estimator(insurance)
+samples <- joint_model_sampler(nrow(insurance), params[1], params[2], params[3], params[4], params[5])
+observed <- insurance[,2:3]
+
+mean(samples[,1])
+mean(observed[,1])
+
+mean(samples[,2])
+mean(observed[,2])
+
+sd(samples[,1])
+sd(observed[,1])
+
+sd(samples[,2])
+sd(observed[,2])
+
+cor(samples[,1], samples[,2])
+cor(observed[,1], observed[,2])
+
+samples <- as.data.frame(samples)
+samplemat <- cbind(samples, replicate(nrow(samples), "Samples"))
+observemat <- cbind(observed, replicate(nrow(observed), "Observed"))
+colnames(samplemat) <- c("PLI", "WC", "Data")
+colnames(observemat) <- c("PLI", "WC", "Data")
+merged <- rbind(samplemat, observemat)
+merged$Data <- as.factor(merged$Data)
+
+ggplot(merged, aes(x=PLI, y=WC, color=Data)) +
+  geom_point() +
+  ggtitle("Scatter plot PLI and WC of observed and sampled data")+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_color_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(PLI, fill=Data)) + 
+  geom_density(alpha=.5) +
+  ggtitle("PLI densities for the observed and sampled data")+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_fill_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(WC, fill=Data)) + 
+  geom_density(alpha=.5) +
+  ggtitle("WC densities for the observed and sampled data")+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_fill_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(PLI, WC, color = Data)) +
+  geom_density_2d()+
+  ggtitle("Contour plot for the observed and sampled data")+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_colour_manual(values=c("steelblue2", "orange"))
+```
+
+Next up three blocks of code will show what happens when certain parameters are changed.
+Changing \(\mu_1\) to 4
+```{r}
+params <- param_estimator(insurance)
+samples <- joint_model_sampler(nrow(insurance), 4, params[2], params[3], params[4], params[5])
+observed <- insurance[,2:3]
+
+samples <- as.data.frame(samples)
+samplemat <- cbind(samples, replicate(nrow(samples), "Samples"))
+observemat <- cbind(observed, replicate(nrow(observed), "Observed"))
+colnames(samplemat) <- c("PLI", "WC", "Data")
+colnames(observemat) <- c("PLI", "WC", "Data")
+merged <- rbind(samplemat, observemat)
+merged$Data <- as.factor(merged$Data)
+
+ggplot(merged, aes(x=PLI, y=WC, color=Data)) +
+  geom_point()+
+  ggtitle(TeX("Scatter plot PLI and WC, $\\mu_1 = 4$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_color_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(PLI, fill=Data)) + 
+  geom_density(alpha=.5) +
+  ggtitle(TeX("PLI densities, $\\mu_1 = 4$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_fill_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(WC, fill=Data)) + 
+  geom_density(alpha=.5) +
+  ggtitle(TeX("WC densities, $\\mu_1 = 4$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_fill_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(PLI, WC, color = Data)) +
+  geom_density_2d()+
+  ggtitle(TeX("Contour plot PLI and WC, $\\mu_1 = 4$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_colour_manual(values=c("steelblue2", "orange"))
+
+mean(samples[,1])
+sd(samples[,1])
+cor(samples[,1], samples[,2])
+```
+
+Changing \(\sigma_2\) to 0.1
+```{r}
+params <- param_estimator(insurance)
+samples <- joint_model_sampler(nrow(insurance), params[1], params[2], params[3], 0.1, params[5])
+observed <- insurance[,2:3]
+
+samples <- as.data.frame(samples)
+samplemat <- cbind(samples, replicate(nrow(samples), "Samples"))
+observemat <- cbind(observed, replicate(nrow(observed), "Observed"))
+colnames(samplemat) <- c("PLI", "WC", "Data")
+colnames(observemat) <- c("PLI", "WC", "Data")
+merged <- rbind(samplemat, observemat)
+merged$Data <- as.factor(merged$Data)
+
+ggplot(merged, aes(x=PLI, y=WC, color=Data)) +
+  geom_point()+
+  ggtitle(TeX("Scatter plot PLI and WC, $\\sigma_2 = 0.1$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_color_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(PLI, fill=Data)) + 
+  geom_density(alpha=.5) +
+  ggtitle(TeX("PLI densities, $\\sigma_2 = 0.1$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_fill_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(WC, fill=Data)) + 
+  geom_density(alpha=.5) +
+  ggtitle(TeX("WC densities, $\\sigma_2 = 0.1$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_fill_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(PLI, WC, color = Data)) +
+  geom_density_2d()+
+  ggtitle(TeX("Contour plot PLI and WC, $\\sigma_2 = 0.1$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_colour_manual(values=c("steelblue2", "orange"))
+
+mean(samples[,2])
+sd(samples[,2])
+cor(samples[,1], samples[,2])
+```
+
+Changing \(\theta\) to 50
+```{r}
+params <- param_estimator(insurance)
+samples <- joint_model_sampler(nrow(insurance), params[1], params[2], params[3], params[4], 50)
+observed <- insurance[,2:3]
+
+samples <- as.data.frame(samples)
+samplemat <- cbind(samples, replicate(nrow(samples), "Samples"))
+observemat <- cbind(observed, replicate(nrow(observed), "Observed"))
+colnames(samplemat) <- c("PLI", "WC", "Data")
+colnames(observemat) <- c("PLI", "WC", "Data")
+merged <- rbind(samplemat, observemat)
+merged$Data <- as.factor(merged$Data)
+
+ggplot(merged, aes(x=PLI, y=WC, color=Data)) +
+  geom_point()+
+  ggtitle(TeX("Scatter plot PLI and WC, $\\theta = 50$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_color_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(PLI, fill=Data)) + 
+  geom_density(alpha=.5) +
+  ggtitle(TeX("PLI densities, $\\theta = 50$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_fill_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(WC, fill=Data)) + 
+  geom_density(alpha=.5) +
+  ggtitle(TeX("WC densities, $\\theta = 50$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_fill_manual(values=c("steelblue2", "orange"))
+
+ggplot(merged, aes(PLI, WC, color = Data)) +
+  geom_density_2d()+
+  ggtitle(TeX("Contour plot PLI and WC, $\\theta = 50$"))+
+  theme(plot.title = element_text(size = 10, face = "bold"))+
+  scale_colour_manual(values=c("steelblue2", "orange"))
+
+mean(samples[,1])
+sd(samples[,1])
+mean(samples[,2])
+sd(samples[,2])
+cor(samples[,1],samples[,2])
+```
+
+Joe copula density with ML estimate \(\hat \theta\) plugged in for \(\theta\)
+```{r}
+params <- param_estimator(insurance)
+persp(joeCopula(dim = 2, params[5]), dCopula, main ="Density Joe copula", xlab = "PLI", ylab = "WC", col = "steelblue2")
+```
+
+The simulation study
+```{r}
+sym_study <- function(n, mu_1, sigma_1, mu_2, sigma_2, theta){
+  R <- 100
+  real_parameters <- c(mu_1, sigma_1, mu_2, sigma_2, theta)
+  estimated_parameters <- matrix(NA, nrow = R, ncol = 5)
+  
+  RMSE <- function(real_param, est_param){
+    rmse <- sqrt((sum((est_param - replicate(length(est_param), real_param))^2))/length(est_param))
+  return(rmse)
+  }
+
+  for(r in 1:R){
+    sampled_data <- joint_model_sampler(n, mu_1, sigma_1, mu_2, sigma_2, theta)   
+    estimated_parameters[r,] <- param_estimator(sampled_data)
+  }
+  rmse_mu_1 <- RMSE(real_parameters[1], estimated_parameters[,1])
+  rmse_sigma_1 <- RMSE(real_parameters[2], estimated_parameters[,2])
+  rmse_mu_2 <- RMSE(real_parameters[3], estimated_parameters[,3])
+  rmse_sigma_2 <- RMSE(real_parameters[4], estimated_parameters[,4])
+  rmse_theta <- RMSE(real_parameters[5], estimated_parameters[,5])
+  return(c(rmse_mu_1, rmse_sigma_1, rmse_mu_2, rmse_sigma_2, rmse_theta))
+}
+
+rmse_200 <- sym_study(200, 1, 2, 3, 0.5, 2)
+rmse_500 <- sym_study(500, 1, 2, 3, 0.5, 2)
+rmse_1000 <- sym_study(1000, 1, 2, 3, 0.5, 2)
+
+time_200 <- system.time(sym_study(200, 1, 2, 3, 0.5, 2))[3]/100
+time_500 <- system.time(sym_study(500, 1, 2, 3, 0.5, 2))[3]/100
+time_1000 <- system.time(sym_study(1000, 1, 2, 3, 0.5, 2))[3]/100
+```
+
+Plotting the RMSE for the various parameters
+```{r}
+ns <- c(200,500,1000)
+rmse_mu_1 <- as.data.frame(c(rmse_200[1], rmse_500[1], rmse_1000[1]))
+rmse_sigma_1 <- as.data.frame(c(rmse_200[2], rmse_500[2], rmse_1000[2]))
+rmse_mu_2 <- as.data.frame(c(rmse_200[3], rmse_500[3], rmse_1000[3]))
+rmse_sigma_2 <- as.data.frame(c(rmse_200[4], rmse_500[4], rmse_1000[4]))
+rmse_theta <- as.data.frame(c(rmse_200[5], rmse_500[5], rmse_1000[5]))
+
+rmse_mu_1_mat <- cbind(ns, rmse_mu_1, replicate(length(rmse_mu_1), "Mu 1"))
+rmse_sigma_1_mat <- cbind(ns, rmse_sigma_1, replicate(length(rmse_sigma_1), "Sigma 1"))
+rmse_mu_2_mat <- cbind(ns, rmse_mu_2, replicate(length(rmse_mu_2), "Mu 2"))
+rmse_sigma_2_mat <- cbind(ns, rmse_sigma_2, replicate(length(rmse_sigma_2), "Sigma 2"))
+rmse_theta_mat <- cbind(ns, rmse_theta, replicate(length(rmse_theta), "Theta"))
+
+colnames(rmse_mu_1_mat) <- c("n", "RMSE", "Parameter")
+colnames(rmse_sigma_1_mat) <- c("n", "RMSE", "Parameter")
+colnames(rmse_mu_2_mat) <- c("n", "RMSE", "Parameter")
+colnames(rmse_sigma_2_mat) <- c("n", "RMSE", "Parameter")
+colnames(rmse_theta_mat) <- c("n", "RMSE", "Parameter")
+
+rmse_merged <- rbind(rmse_mu_1_mat, rmse_sigma_1_mat, rmse_mu_2_mat, rmse_sigma_2_mat, rmse_theta_mat)
+rmse_merged$Parameter <- as.factor(rmse_merged$Parameter)
+
+ggplot(data=rmse_merged, aes(x=n, y=RMSE, colour=Parameter)) +
+       geom_line()+
+       ggtitle("RMSE for all model parameters") +
+       xlab("n")+ 
+       ylab("RMSE")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))+
+       scale_color_discrete(labels = unname(TeX(c("$\\mu_1$", "$\\mu_2$", "$\\sigma_1$", "$\\sigma_2$", "$\\theta$"))))
+```
+
+Plotting the average time for the various parameters
+```{r}
+ns <- c(200,500,1000)
+time_df <- as.data.frame(cbind(ns, rbind(time_200, time_500, time_1000)))
+colnames(time_df) <- c("n", "Time")
+rownames(time_df) <- seq(1:nrow(time_df))
+
+ggplot(data=time_df, aes(x=n, y=Time)) +
+       geom_line(color='steelblue2') +
+       ggtitle("Elapsed time RMSE simulation study") +
+       xlab("n")+ 
+       ylab("Time in seconds")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+```
+
+Monte Carlo simulation to compute the expected payout \(V(t)\).
+```{r}
+MC_sim <- function(data, n){
+  params <- param_estimator(data)
+  samples <- joint_model_sampler(10^5, params[1], params[2], params[3], params[4], params[5])
+  t <- seq(100,200,10)
+  V <- numeric(length(t))
+  for(i in 1:length(t)){
+      V[i] <- mean((samples[,1] + samples[,2] > t[i])*(samples[,1] + samples[,2]))
+  }
+  V_t_df <- as.data.frame(cbind(t, V))
+  
+  return(V_t_df)
+}  
+
+MC_df <- MC_sim(insurance, 10^5)
+
+ggplot(data=MC_df, aes(x=t, y=V)) +
+       geom_line(color='steelblue2') +
+       ggtitle("Expected payout of the reinsurance in millions of euros") +
+       xlab("t")+ 
+       ylab("V(t)")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+```
+
+Importance sampling to compute the expected payout \(V(t)\).
+```{r}
+IS_copula <- function(n, data, mu_1_alt, sigma_1_alt, mu_2_alt, sigma_2_alt, theta_alt){
+
+  params <- param_estimator(data)
+  Y <- joint_model_sampler(n, mu_1_alt, sigma_1_alt, mu_2_alt, sigma_2_alt, theta_alt)
+  F_1 <- function(q, mu_1_hat, sigma_1_hat) plnorm(q, mu_1_hat, sigma_1_hat)
+  F_2 <- function(q, mu_2_hat, sigma_2_hat) plnorm(q, mu_2_hat, sigma_2_hat)
+  U_1_hat <- F_1
+  U_2_hat <- F_2
+  
+  u1_x <- sapply(Y[,1], U_1_hat, params[1], params[2])
+  u2_x <- sapply(Y[,2], U_2_hat, params[3], params[4])
+  u_x <- matrix(cbind(u1_x,u2_x), ncol = 2)
+  u1_y <- sapply(Y[,1], U_1_hat, mu_1_alt, sigma_1_alt)
+  u2_y <- sapply(Y[,2], U_2_hat, mu_2_alt, sigma_2_alt)
+  u_y <- matrix(cbind(u1_y,u2_y), ncol = 2)
+
+  t <- seq(100,200,10)
+  V <- numeric(length(t))
+  w <- (dlnorm(Y[,1], params[1], params[2])*dlnorm(Y[,2], params[3], params[4])*dCopula(u_x, joeCopula(params[5])))/(dlnorm(Y[,1], mu_1_alt, sigma_1_alt)*dlnorm(Y[,2], mu_2_alt, sigma_2_alt)*dCopula(u_y, joeCopula(theta_alt)))
+  for(i in 1:length(t)){
+      V[i] <- mean(((Y[,1] + Y[,2] > t[i])*(Y[,1] + Y[,2]))*w)
+  }
+  
+  P <- function(t) (40000*exp(-t/7))
+  cost <- sapply(t, P)
+  
+  IS_merged <- function(V, t, cost){
+    V_df <- as.data.frame(cbind(V, t, replicate(length(t), "V(t)")))
+    Cost_df <- as.data.frame(cbind(cost, t, replicate(length(t), "P(t)")))
+  
+    colnames(V_df) <- c("Euros", "t", "Function")
+    colnames(Cost_df) <- c("Euros", "t", "Function")
+  
+    V_df$Euros <- as.numeric(V_df$Euros)
+    V_df$t <- as.numeric(V_df$t)
+    Cost_df$Euros <- as.numeric(Cost_df$Euros)
+    Cost_df$t <- as.numeric(Cost_df$t)
+    V_cost_df <- rbind(V_df, Cost_df)
+    V_cost_df$Function <- as.factor(V_cost_df$Function)
+  
+    return(V_cost_df)
+  }
+  IS_df <- IS_merged(V, t, cost) 
+  
+  return(IS_df)
+}
+
+IS_df <- IS_copula(10^5, insurance, 2.8, 1, 4, 0.25, 5.8)
+
+ggplot(data=IS_df, aes(x=t, y=Euros, colour=Function)) +
+       geom_line()+
+       ggtitle("Expected payout of the reinsurance in millions of euros") +
+       xlab("t")+ 
+       ylab("Millions of euros")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))+
+       scale_color_manual(values=c("orange", "steelblue2"))
+```
+
+Functions to evaluate at which values for \(t\) purchasing the insurance is expected to be profitable for ANV and for which value of \(t\) the expected profit is maximized.
+```{r}
+profitable <- function(V, t){
+  profit_t <- numeric(length(t))
+  P <- function(t) (40000*exp(-t/7))
+  for(i in 1:length(t)){
+    if((V[i] - P(t[i]))>0){
+      profit_t[i] <- t[i]
+    }
+  }
+  profit_t <- profit_t[profit_t != 0]
+  return(profit_t)
+}
+
+max_profit <- function(V, t){
+  max_t <- numeric(length(t))
+  P <- function(t) (40000*exp(-t/7))
+  for(i in 1:length(t)){
+    max_t[i] <- V[i] - P(t[i])
+  }
+  max_ind <-which.max(max_t)
+  return(t[max_ind])
+}
+
+V <- IS_df[1:11,1]
+t <- IS_df[1:11,2]
+
+profitable(V, t)
+max_profit(V, t)
+```
+
+Finally, a bootstrap method is used to compute 80% confidence intervals. Please  beware that this will take a while, as \(B\), the number of bootstrap samples is 1000. Note that the \(\texttt{IS_copula()}\) function was adjusted slightly from the one above, as this new \(\texttt{IS_copula_bootstrap()}\) allows for a data argument \(\texttt{Y}\), whereas \(\texttt{IS_copula()}\) did not, as well as some general attemts at optimizing the function such as removing the need to use the \(\texttt{param_estimator()}\) function, which now is evaluated only once instead of \(B\) times. This was done to allow for the bootstrap resampling of data, which could then be used in exactly the same manner as above. Also note that this chunk of code is not put in a function like most of the above, as the \(\texttt{V_mat}\) matrix was needed to plot the histograms below, and putting everything in functions caused more problems than it solved.
+```{r}
+IS_copula_bootstrap <- function(Y){
+  F_1 <- function(q, mu_1_hat, sigma_1_hat) plnorm(q, mu_1_hat, sigma_1_hat)
+  F_2 <- function(q, mu_2_hat, sigma_2_hat) plnorm(q, mu_2_hat, sigma_2_hat)
+  U_1_hat <- F_1
+  U_2_hat <- F_2
+  
+  u1_x <- sapply(Y[,1], U_1_hat, params[1], params[2])
+  u2_x <- sapply(Y[,2], U_2_hat, params[3], params[4])
+  u_x <- matrix(cbind(u1_x,u2_x), ncol = 2)
+  u1_y <- sapply(Y[,1], U_1_hat, mu_1_alt, sigma_1_alt)
+  u2_y <- sapply(Y[,2], U_2_hat, mu_2_alt, sigma_2_alt)
+  u_y <- matrix(cbind(u1_y,u2_y), ncol = 2)
+
+  V <- numeric(length(t))
+  w <- (dlnorm(Y[,1], params[1], params[2])*dlnorm(Y[,2], params[3], params[4])*dCopula(u_x, joeCopula(params[5])))/(dlnorm(Y[,1], mu_1_alt, sigma_1_alt)*dlnorm(Y[,2], mu_2_alt, sigma_2_alt)*dCopula(u_y, joeCopula(theta_alt)))
+  for(i in 1:length(t)){
+      V[i] <- mean(((Y[,1] + Y[,2] > t[i])*(Y[,1] + Y[,2]))*w)
+  }
+  return(V)
+}
+
+params <- param_estimator(insurance)
+n <- 10^5
+mu_1_alt <- 2.8
+sigma_1_alt <- 1
+mu_2_alt <- 4
+sigma_2_alt <- 0.25
+theta_alt <- 5.8
+t <- seq(100,200,10)
+
+Y <- joint_model_sampler(n, mu_1_alt, sigma_1_alt, mu_2_alt, sigma_2_alt, theta_alt)
+V <- IS_copula_bootstrap(Y)
+B <- 1000
+V_mat <- matrix(NA, nrow = B, ncol = length(V))
+for (b in 1:B) {
+  Y_b <- Y[sample(nrow(Y), n, replace = TRUE),]
+  V_mat[b,] <- IS_copula_bootstrap(Y_b)
+}
+
+CI_mat <- matrix(NA, nrow = length(V), ncol = 2)
+for(i in 1:length(V)){
+  CI_mat[i,] <- 2 * V[i] - quantile(V_mat[,i], c(0.9, 0.1))
+}
+
+P <- function(t) (40000*exp(-t/7))
+cost <- sapply(t, P)
+
+V_df <- as.data.frame(cbind(V, t, replicate(length(t), "V(t)")))
+Cost_df <- as.data.frame(cbind(cost, t, replicate(length(t), "P(t)")))
+CI_L_df <- as.data.frame(cbind(CI_mat[,1], t, replicate(length(t), "CI_L")))
+CI_U_df <- as.data.frame(cbind(CI_mat[,2], t, replicate(length(t), "CI_U")))
+colnames(V_df) <- c("Euros", "t", "Function")
+colnames(Cost_df) <- c("Euros", "t", "Function")
+colnames(CI_L_df) <- c("Euros", "t", "Function")
+colnames(CI_U_df) <- c("Euros", "t", "Function")
+V_df$Euros <- as.numeric(V_df$Euros)
+V_df$t <- as.numeric(V_df$t)
+Cost_df$Euros <- as.numeric(Cost_df$Euros)
+Cost_df$t <- as.numeric(Cost_df$t)
+CI_L_df$Euros <- as.numeric(CI_L_df$Euros)
+CI_L_df$t <- as.numeric(CI_L_df$t)
+CI_U_df$Euros <- as.numeric(CI_U_df$Euros)
+CI_U_df$t <- as.numeric(CI_U_df$t)
+Bootstrap_df <- rbind(V_df, Cost_df, CI_L_df, CI_U_df)
+Bootstrap_df$Function <- as.factor(Bootstrap_df$Function)
+
+Bootstrap_df_new <- Bootstrap_df
+Bootstrap_df_new$CI_L <- rep(Bootstrap_df[Bootstrap_df[,3] == "CI_L",1], length(levels(Bootstrap_df$Function)))
+Bootstrap_df_new$CI_U <- rep(Bootstrap_df[Bootstrap_df[,3] == "CI_U",1], length(levels(Bootstrap_df$Function)))
+                                   
+ggplot(data=Bootstrap_df_new, aes(x=t, y=Euros, colour=Function)) +
+       geom_line()+
+       geom_ribbon(aes(x=t, ymax=CI_U, ymin=CI_L), fill="lightblue", alpha=.05) +
+       ggtitle("Expected payout of the reinsurance in millions of euros") +
+       xlab("t")+ 
+       ylab("Millions of euros")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))+
+       scale_color_manual(labels=c("CI lower bound","CI upper bound","P(t)", "V(t)"), values=c("steelblue2", "steelblue2", "orange", "steelblue2"))
+```
+
+Histograms to show distribution of $V(t)$
+```{r}
+V_hist_df <- as.data.frame(V_mat)
+
+ggplot(V_hist_df, aes(x=V1)) + 
+       geom_histogram(bins=50, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 100") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V2)) + 
+       geom_histogram(bins=50, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 110") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V3)) + 
+       geom_histogram(bins=50, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 120") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V4)) + 
+       geom_histogram(bins=50, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 130") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V5)) + 
+       geom_histogram(bins=50, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 140") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V6)) + 
+       geom_histogram(bins=50, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 150") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V7)) + 
+       geom_histogram(bins=50, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 160") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V8)) + 
+       geom_histogram(bins=50, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 170") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V9)) + 
+       geom_histogram(bins=50, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 180") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V10)) + 
+       geom_histogram(bins=10, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 190") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+
+ggplot(V_hist_df, aes(x=V11)) + 
+       geom_histogram(bins=10, fill = "steelblue2", color = "black")+
+       ggtitle("Histogram of V(t) for t = 200") +
+       xlab("V(t)")+ 
+       ylab("Count")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))
+```
+
+Same bootstrap method as above but with a 95% CI
+```{r}
+params <- param_estimator(insurance)
+n <- 10^5
+mu_1_alt <- 2.8
+sigma_1_alt <- 1
+mu_2_alt <- 4
+sigma_2_alt <- 0.25
+theta_alt <- 5.8
+t <- seq(100,200,10)
+
+Y <- joint_model_sampler(n, mu_1_alt, sigma_1_alt, mu_2_alt, sigma_2_alt, theta_alt)
+V <- IS_copula_bootstrap(Y)
+B <- 1000
+V_mat <- matrix(NA, nrow = B, ncol = length(V))
+for (b in 1:B) {
+  Y_b <- Y[sample(nrow(Y), n, replace = TRUE),]
+  V_mat[b,] <- IS_copula_bootstrap(Y_b)
+}
+
+CI_mat <- matrix(NA, nrow = length(V), ncol = 2)
+for(i in 1:length(V)){
+  CI_mat[i,] <- 2 * V[i] - quantile(V_mat[,i], c(0.975, 0.025))
+}
+
+P <- function(t) (40000*exp(-t/7))
+cost <- sapply(t, P)
+
+V_df <- as.data.frame(cbind(V, t, replicate(length(t), "V(t)")))
+Cost_df <- as.data.frame(cbind(cost, t, replicate(length(t), "P(t)")))
+CI_L_df <- as.data.frame(cbind(CI_mat[,1], t, replicate(length(t), "CI_L")))
+CI_U_df <- as.data.frame(cbind(CI_mat[,2], t, replicate(length(t), "CI_U")))
+colnames(V_df) <- c("Euros", "t", "Function")
+colnames(Cost_df) <- c("Euros", "t", "Function")
+colnames(CI_L_df) <- c("Euros", "t", "Function")
+colnames(CI_U_df) <- c("Euros", "t", "Function")
+V_df$Euros <- as.numeric(V_df$Euros)
+V_df$t <- as.numeric(V_df$t)
+Cost_df$Euros <- as.numeric(Cost_df$Euros)
+Cost_df$t <- as.numeric(Cost_df$t)
+CI_L_df$Euros <- as.numeric(CI_L_df$Euros)
+CI_L_df$t <- as.numeric(CI_L_df$t)
+CI_U_df$Euros <- as.numeric(CI_U_df$Euros)
+CI_U_df$t <- as.numeric(CI_U_df$t)
+Bootstrap_df <- rbind(V_df, Cost_df, CI_L_df, CI_U_df)
+Bootstrap_df$Function <- as.factor(Bootstrap_df$Function)
+
+Bootstrap_df_new <- Bootstrap_df
+Bootstrap_df_new$CI_L <- rep(Bootstrap_df[Bootstrap_df[,3] == "CI_L",1], length(levels(Bootstrap_df$Function)))
+Bootstrap_df_new$CI_U <- rep(Bootstrap_df[Bootstrap_df[,3] == "CI_U",1], length(levels(Bootstrap_df$Function)))
+                                   
+ggplot(data=Bootstrap_df_new, aes(x=t, y=Euros, colour=Function)) +
+       geom_line()+
+       geom_ribbon(aes(x=t, ymax=CI_U, ymin=CI_L), fill="lightblue", alpha=.05) +
+       ggtitle("Expected payout of the reinsurance in millions of euros") +
+       xlab("t")+ 
+       ylab("Millions of euros")+
+       theme(
+       plot.title = element_text(size=10, face = "bold"))+
+       scale_color_manual(labels=c("CI lower bound","CI upper bound","P(t)", "V(t)"), values=c("steelblue2", "steelblue2", "orange", "steelblue2"))
+```
